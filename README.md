@@ -1,2 +1,2 @@
 # DINGTALK_CALLBACK
-ABAP封装的钉钉事件订阅回调
+ABAP封装的钉钉事件订阅回调SICF服务
