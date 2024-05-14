@@ -59,13 +59,18 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
              eventtype TYPE string,
            END OF t_JSON1_event.
     DATA:wa_event TYPE t_JSON1_event.
+    DATA my_logger TYPE REF TO zif_logger.
 *返回消息
     DEFINE http_msg.
       server->response->set_header_field( name = 'Content-Type' value = 'application/json;charset=utf-8' ).
       server->response->set_status( code = 200  reason = 'ok' ).
       server->response->set_cdata( EXPORTING data   = &1 ).
     END-OF-DEFINITION.
-
+    my_logger = zcl_logger_factory=>create_log(
+                        object    = 'ZDINGTALK'
+                        subobject = 'ZDT_CB'
+                        desc      = 'ZCL_DINGTALK_CALLBACK'
+                        settings = zcl_logger_factory=>create_settings( ) ).
     CLEAR:lt_header,json.
     server->request->get_header_fields( CHANGING fields = lt_header ).
 *从配置表获取加密 aes_key、签名 token以及AppKey
@@ -76,6 +81,7 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
         DATA(msg) = `{"rtype": "S","rtmsg": "钉钉回调服务已启动","appid":"` && appid
         && `","appname":"` && wa_ztddconf-name && `","author":"kkw","mail":"weikj@foxmail.com"}`.
         http_msg msg.
+        my_logger->s( obj_to_log = msg ) .
       WHEN 'POST'.
 *获取query参数
         READ TABLE lt_header INTO DATA(wa_params) WITH KEY name = '~query_string' .
@@ -120,8 +126,12 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
             OTHERS                = 5.
         IF sy-subrc <> 0.
 *   Implement suitable error handling here
+          my_logger->s( obj_to_log = |解密钉钉回调请求报文{ wa_encrypt-encrypt }失败| ) .
+          http_msg `error`.
+          RETURN.
         ENDIF.
         /ui2/cl_json=>deserialize( EXPORTING json = text  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_event ).
+        my_logger->s( obj_to_log = |响应钉钉回调事件{ wa_event-eventtype }| ) .
         CASE wa_event-eventtype.
           WHEN 'check_url'." 验证请求  02.05.2024 23:28:48 by kkw
             CALL METHOD dingcryptode->getencryptedmap
