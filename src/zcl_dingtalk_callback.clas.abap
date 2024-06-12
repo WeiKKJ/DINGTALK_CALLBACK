@@ -10,13 +10,20 @@ protected section.
 private section.
 
   data MY_PARAMS type TIHTTPNVP .
-  data APPID type ZE_APPID value `2dce6c4b-8695-4a79-8c38-eb5be6633cfe` ##NO_TEXT.
+  data APPID type ZE_APPID value `622d3932-4d65-47b0-8097-b6ef3b795dde` ##NO_TEXT.
 
   methods GET_PARAMS
     importing
       !PARAMS type STRING
     returning
       value(MY_PARAMS) type TIHTTPNVP .
+  methods ADD_LOG
+    importing
+      value(NAME) type RS38L_FNAM
+      value(EVENTTYPE) type RS38L_PAR_
+      value(DETAIL_ORI) type ANY optional
+      value(DETAIL) type ANY
+      value(SECDS) type ZILOGSECDS .
 ENDCLASS.
 
 
@@ -44,16 +51,17 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
          host      TYPE string,
          port      TYPE string.
     TYPES:BEGIN OF t_JSON1,
-            encrypt        TYPE string,
-            encrypt_decode TYPE string,
+            msg_signature TYPE string,
+            timestamp     TYPE string,
+            nonce         TYPE string,
+            encrypt       TYPE string,
           END OF t_JSON1.
     DATA:wa_encrypt TYPE t_JSON1.
-    DATA:dingCryptode   TYPE REF TO zcl_dingtalk_callback_crypto.
-    DATA:msg_signature TYPE string,
-         timestamp     TYPE string,
-         nonce         TYPE string,
-         content       TYPE string,
-         text          TYPE string.
+    DATA:text TYPE string.
+    DATA:dingCryptode TYPE REF TO zcl_dingtalk_callback_crypto.
+    DATA: zilogt1 TYPE i,
+          zilogt2 TYPE i,
+          secds   TYPE zilogsecds.
     " 解密后的消息体结构  02.05.2024 18:23:28 by kkw
     TYPES: BEGIN OF t_JSON1_event,
              eventtype TYPE string,
@@ -83,25 +91,29 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
         http_msg msg.
         my_logger->s( obj_to_log = msg ) .
       WHEN 'POST'.
+        GET RUN TIME FIELD zilogt1.
 *获取query参数
+        CLEAR:my_params,json.
         READ TABLE lt_header INTO DATA(wa_params) WITH KEY name = '~query_string' .
         my_params = me->get_params( EXPORTING params = wa_params-value ).
         json = server->request->if_http_entity~get_cdata( ).
+
+        CLEAR:wa_encrypt.
         /ui2/cl_json=>deserialize( EXPORTING json = json  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_encrypt ).
 
-        CLEAR:msg_signature,timestamp,nonce.
         READ TABLE my_params ASSIGNING FIELD-SYMBOL(<my_params>) WITH KEY name = 'signature'.
         IF sy-subrc EQ 0.
-          msg_signature = <my_params>-value.
+          wa_encrypt-msg_signature = <my_params>-value.
         ENDIF.
         READ TABLE my_params ASSIGNING <my_params> WITH KEY name = 'timestamp'.
         IF sy-subrc EQ 0.
-          timestamp = <my_params>-value.
+          wa_encrypt-timestamp = <my_params>-value.
         ENDIF.
         READ TABLE my_params ASSIGNING <my_params> WITH KEY name = 'nonce'.
         IF sy-subrc EQ 0.
-          nonce = <my_params>-value.
+          wa_encrypt-nonce = <my_params>-value.
         ENDIF.
+        DATA(json_ori) = /ui2/cl_json=>serialize( data = wa_encrypt  compress = abap_false pretty_name = /ui2/cl_json=>pretty_mode-low_case ).
 *解密请求报文
         FREE dingcryptode.
         CREATE OBJECT dingcryptode
@@ -112,9 +124,9 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
         CLEAR:text.
         CALL METHOD dingcryptode->getdecryptmsg
           EXPORTING
-            msg_signature         = msg_signature
-            timestamp             = timestamp
-            nonce                 = nonce
+            msg_signature         = wa_encrypt-msg_signature
+            timestamp             = wa_encrypt-timestamp
+            nonce                 = wa_encrypt-nonce
             content               = wa_encrypt-encrypt
           RECEIVING
             text                  = text
@@ -124,14 +136,33 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
             padding_error         = 3
             appkey_error          = 4
             OTHERS                = 5.
+        GET RUN TIME FIELD zilogt2.
+        secds = ( zilogt2 - zilogt1 ) / 1000000.
         IF sy-subrc <> 0.
+          CALL METHOD me->add_log
+            EXPORTING
+              name       = CONV rs38l_fnam( 'ZDT_CB' )
+              eventtype  = CONV rs38l_par_( wa_event-eventtype )
+              detail_ori = json_ori
+              detail     = `{"msg":"解密钉钉回调请求报文失败"}`
+              secds      = secds.
+
 *   Implement suitable error handling here
           my_logger->s( obj_to_log = |解密钉钉回调请求报文{ wa_encrypt-encrypt }失败| ) .
           http_msg `error`.
           RETURN.
         ENDIF.
+        CLEAR wa_event.
         /ui2/cl_json=>deserialize( EXPORTING json = text  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_event ).
-        my_logger->s( obj_to_log = |响应钉钉回调事件{ wa_event-eventtype }| ) .
+        my_logger->s( obj_to_log = |响应钉钉回调事件{ wa_event-eventtype },解密后报文{ text }| ) .
+        CALL METHOD me->add_log
+          EXPORTING
+            name       = CONV rs38l_fnam( 'ZDT_CB' )
+            eventtype  = CONV rs38l_par_( wa_event-eventtype )
+            detail_ori = json_ori
+            detail     = text
+            secds      = secds.
+
         CASE wa_event-eventtype.
           WHEN 'check_url'." 验证请求  02.05.2024 23:28:48 by kkw
             CALL METHOD dingcryptode->getencryptedmap
@@ -150,5 +181,246 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
         ENDCASE.
       WHEN OTHERS.
     ENDCASE.
+  ENDMETHOD.
+
+
+  METHOD add_log.
+    DATA:BEGIN OF zilogkeystr,
+           name   TYPE zabap_log-name,
+           erdat  TYPE zabap_log-erdat,
+           stamp  TYPE zabap_log-stamp,
+           indx   TYPE zabap_log-indx,
+           fdname TYPE zabap_log-fdname,
+         END OF zilogkeystr.
+    DATA:wa_zilogdata TYPE zabap_log.
+    DATA:zilogzonlo     TYPE sy-zonlo,
+         zilogtsl       TYPE timestampl,
+         zilogtsstr(30).
+    DATA:loginusers    TYPE TABLE OF uinfo,
+         loginusers_wa TYPE uinfo,
+         curusertid    TYPE          sy-index.
+
+    GET TIME STAMP FIELD zilogtsl.
+    zilogkeystr-name = name.
+    IF sy-zonlo IS INITIAL.
+      zilogzonlo = 'UTC+8'.
+    ELSE.
+      zilogzonlo = sy-zonlo.
+    ENDIF.
+    WRITE zilogtsl TIME ZONE zilogzonlo TO zilogtsstr .
+    zilogkeystr-erdat = sy-datum.
+    zilogkeystr-stamp = zilogtsstr+11(15).
+    CALL FUNCTION 'THUSRINFO'
+      TABLES
+        usr_tabl = loginusers.
+    CALL FUNCTION 'TH_USER_INFO'
+      IMPORTING
+        tid = curusertid.
+    READ TABLE loginusers INTO loginusers_wa WITH KEY tid = curusertid.
+
+    zilogkeystr-indx   = '10'.
+    zilogkeystr-fdname = eventtype.
+
+    wa_zilogdata-area  = sy-repid+4.
+    wa_zilogdata-ernam = sy-uname.
+    wa_zilogdata-memo  = 'B'.
+    wa_zilogdata-erdat = sy-datum.
+    wa_zilogdata-uterm = loginusers_wa-term.
+    wa_zilogdata-secds = 0.
+    wa_zilogdata-fdname = eventtype.
+    EXPORT detail FROM detail_ori TO DATABASE zabap_log(fl) ID zilogkeystr FROM wa_zilogdata.
+
+    zilogkeystr-indx   = '20'.
+    wa_zilogdata-memo  = 'R'.
+    wa_zilogdata-secds = secds.
+    EXPORT detail FROM detail TO DATABASE zabap_log(fl) ID zilogkeystr FROM wa_zilogdata.
+
+    COMMIT WORK.
+
+*DEFINE zfmdatasave1.
+*  DATA: header_gd TYPE header_fb,
+*        tables_gd TYPE rsfb_para WITH HEADER LINE,
+*        import_gd TYPE rsfb_para WITH HEADER LINE,
+*        export_gd TYPE rsfb_para WITH HEADER LINE,
+*        change_gd TYPE rsfb_para WITH HEADER LINE,
+*        pname_gd  TYPE tfdir-pname.
+*  DATA: BEGIN OF zilogkeystr,
+*          name   LIKE zfmdata-name,
+*          erdat  LIKE zfmdata-erdat,
+*          stamp  LIKE zfmdata-stamp,
+*          indx   LIKE zfmdata-indx,
+*          fdname LIKE zfmdata-fdname,
+*        END OF zilogkeystr.
+*  DATA: wa_zilogdata       TYPE zfmdata,
+*        wa_zfmdatacfg      TYPE zfmdatacfg,
+*        zilogtsl           TYPE timestampl,
+*        zilogtsstr(30),
+*        zilogindx          TYPE numc1,
+*        zilogfsstr         TYPE string,
+*        zilogstopallrecord , "不再记录所有的函数LOG
+*        zilogrecordnodata,   "只记录调用历史，不记录具体数据
+*        zilogrecordfmstop .  "不记录本函数LOG
+*  DATA: zilogt1    TYPE i,
+*        zilogt2    TYPE i,
+*        zilogzonlo TYPE sy-zonlo.
+*  DATA: loginusers TYPE TABLE OF uinfo WITH HEADER LINE,
+*        curusertid TYPE          sy-index.
+*  DATA: lt_zilogfmstack TYPE TABLE OF sys_calls WITH HEADER LINE .
+*  FIELD-SYMBOLS: <fs_zrfclog> TYPE any .
+*
+*  header_gd-name = &1.
+*  CALL FUNCTION 'SYSTEM_CALLSTACK'
+*    IMPORTING
+*      et_callstack = lt_zilogfmstack[].
+*  READ TABLE lt_zilogfmstack INDEX 1.
+*  header_gd-name = lt_zilogfmstack-eventname.
+*
+*  SELECT SINGLE * INTO wa_zfmdatacfg
+*    FROM zfmdatacfg
+*    BYPASSING BUFFER
+*    WHERE fname = 'STOPALLFMRECORD'.
+*  IF sy-subrc = 0.
+*    zilogstopallrecord = 'X'.
+*  ENDIF.
+*
+*  SELECT SINGLE * INTO wa_zfmdatacfg FROM zfmdatacfg
+*    WHERE fname = header_gd-name.
+*  IF wa_zfmdatacfg-exitfm = 'X' AND zilogstopallrecord = ''.
+*    RETURN.
+*  ENDIF.
+*  IF wa_zfmdatacfg-brkuser = sy-uname AND zilogstopallrecord = ''.
+*    sy-subrc = 4.
+*    sy-fmkey = ''.
+*    WHILE sy-subrc = 4 AND sy-fmkey = ''.
+*      SELECT SINGLE * INTO wa_zfmdatacfg FROM zfmdatacfg
+*        WHERE fname = header_gd-name AND
+*              brkuser <> sy-uname.
+*    ENDWHILE.
+*  ENDIF.
+*  IF wa_zfmdatacfg-nrindex = 'H'.
+*    zilogrecordnodata = 'X'.
+*  ENDIF.
+*  IF wa_zfmdatacfg-nrindex = 'N'.
+*    zilogrecordfmstop = 'X'.
+*  ENDIF.
+*
+*  IF zilogstopallrecord = '' AND zilogrecordfmstop = ''
+*                             AND zilogrecordnodata = ''.
+*    SELECT SINGLE pname INTO pname_gd FROM tfdir
+*      WHERE funcname =  header_gd-name.
+*    CALL FUNCTION 'FUNCTION_INCLUDE_SPLIT'
+*      EXPORTING
+*        program       = pname_gd
+*      IMPORTING
+*        group         = header_gd-area
+*        namespace     = header_gd-namespace
+*      EXCEPTIONS
+*        error_message = 1
+*        othe          = 12.
+*    IF sy-subrc = 0.
+*      CONCATENATE header_gd-namespace header_gd-area
+*                    INTO header_gd-area.
+*      CALL METHOD cl_fb_parameter_db=>read
+*        IMPORTING
+*          tables = tables_gd[]
+*          import = import_gd[]
+*          export = export_gd[]
+*          change = change_gd[]
+*        CHANGING
+*          header = header_gd.
+*    ENDIF.
+*  ENDIF.
+*
+*  IF zilogstopallrecord = '' AND zilogrecordfmstop = ''.
+*    GET RUN TIME FIELD zilogt1.
+*    GET TIME STAMP FIELD zilogtsl.
+*    zilogkeystr-name = header_gd-name.
+*    IF sy-zonlo IS INITIAL.
+*      zilogzonlo = 'UTC+8'.
+*    ELSE.
+*      zilogzonlo = sy-zonlo.
+*    ENDIF.
+*    WRITE zilogtsl TIME ZONE zilogzonlo TO zilogtsstr .
+*    zilogkeystr-erdat = sy-datum.
+*    zilogkeystr-stamp = zilogtsstr+11(15).
+*
+*    CALL FUNCTION 'THUSRINFO'
+*      TABLES
+*        usr_tabl = loginusers.
+*    CALL FUNCTION 'TH_USER_INFO'
+*      IMPORTING
+*        tid = curusertid.
+*    READ TABLE loginusers WITH KEY tid = curusertid.
+*  ENDIF.
+*END-OF-DEFINITION.
+*
+*DEFINE zfmdatasave2.
+*  IF zilogstopallrecord = '' AND zilogrecordfmstop = ''.
+*    GET RUN TIME FIELD zilogt2.
+*    zilogindx = zilogindx + 1 .
+*    IF zilogindx < 10 AND zilogindx NA wa_zfmdatacfg-nrindex AND
+*       ( zilogrecordnodata = '' OR zilogrecordnodata = 'X' AND zilogindx = 1 ) .
+*      zilogkeystr-indx   = zilogindx.
+*      wa_zilogdata-area  = sy-repid+4.
+*      wa_zilogdata-ernam = sy-uname.
+*      wa_zilogdata-memo  = &1 .
+*      wa_zilogdata-erdat = sy-datum.
+*      wa_zilogdata-uterm = loginusers-term .
+*      wa_zilogdata-secds = ( zilogt2 - zilogt1 ) / 1000000 .
+*
+*      IF wa_zfmdatacfg-rtypemp <> ''.
+*        ASSIGN (wa_zfmdatacfg-rtypemp) TO <fs_zrfclog>.
+*      ELSE.
+*        ASSIGN ('RTYPE') TO <fs_zrfclog>.
+*      ENDIF.
+*      IF sy-subrc = 0.
+*        wa_zilogdata-rtype = <fs_zrfclog>.
+*      ENDIF.
+*
+*      IF wa_zfmdatacfg-rtmsgmp <> ''.
+*        ASSIGN (wa_zfmdatacfg-rtmsgmp) TO <fs_zrfclog>.
+*      ELSE.
+*        ASSIGN ('RTMSG') TO <fs_zrfclog>.
+*      ENDIF.
+*      IF sy-subrc = 0.
+*        wa_zilogdata-rtmsg = <fs_zrfclog>.
+*      ENDIF.
+*
+*      LOOP AT import_gd.
+*        ASSIGN (import_gd-parameter) TO <fs_zrfclog>.
+*        CHECK sy-subrc = 0 .
+*        zilogkeystr-fdname = import_gd-parameter.
+*        EXPORT <fs_zrfclog> TO DATABASE zfmdata(fl) ID zilogkeystr FROM wa_zilogdata.
+*      ENDLOOP.
+*
+*      LOOP AT change_gd.
+*        ASSIGN (change_gd-parameter) TO <fs_zrfclog>.
+*        CHECK sy-subrc = 0 .
+*        zilogkeystr-fdname = change_gd-parameter.
+*        EXPORT <fs_zrfclog> TO DATABASE zfmdata(fl) ID zilogkeystr FROM wa_zilogdata.
+*      ENDLOOP.
+*
+*      LOOP AT export_gd.
+*        ASSIGN (export_gd-parameter) TO <fs_zrfclog>.
+*        CHECK sy-subrc = 0 .
+*        zilogkeystr-fdname = export_gd-parameter.
+*        EXPORT <fs_zrfclog> TO DATABASE zfmdata(fl) ID zilogkeystr FROM wa_zilogdata.
+*      ENDLOOP.
+*
+*      LOOP AT tables_gd.
+*        CONCATENATE tables_gd-parameter '[]' INTO zilogfsstr.
+*        ASSIGN (zilogfsstr) TO <fs_zrfclog>.
+*        CHECK sy-subrc = 0 .
+*        zilogkeystr-fdname = tables_gd-parameter.
+*        EXPORT <fs_zrfclog> TO DATABASE zfmdata(fl) ID zilogkeystr FROM wa_zilogdata.
+*      ENDLOOP.
+*
+*      IF import_gd[] IS INITIAL AND change_gd[] IS INITIAL AND
+*         export_gd[] IS INITIAL AND tables_gd[] IS INITIAL.
+*        EXPORT &1 TO DATABASE zfmdata(fl) ID zilogkeystr FROM wa_zilogdata.
+*      ENDIF.
+*    ENDIF.
+*  ENDIF.
+*END-OF-DEFINITION.
   ENDMETHOD.
 ENDCLASS.
