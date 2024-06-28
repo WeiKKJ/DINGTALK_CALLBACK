@@ -1,0 +1,23 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<abapGit version="v1.0.0" serializer="LCL_OBJECT_W3MI" serializer_version="v2.0.0">
+ <asx:abap xmlns:asx="http://www.sap.com/abapxml" version="1.0">
+  <asx:values>
+   <NAME>ZDT_CARD_3BUT</NAME>
+   <TEXT>带3个按钮的钉钉卡片</TEXT>
+   <PARAMS>
+    <WWWPARAMS>
+     <NAME>fileextension</NAME>
+     <VALUE>.json</VALUE>
+    </WWWPARAMS>
+    <WWWPARAMS>
+     <NAME>filename</NAME>
+     <VALUE>回调模板-三个按钮_1719541154820.json</VALUE>
+    </WWWPARAMS>
+    <WWWPARAMS>
+     <NAME>mimetype</NAME>
+     <VALUE>.json</VALUE>
+    </WWWPARAMS>
+   </PARAMS>
+  </asx:values>
+ </asx:abap>
+</abapGit>

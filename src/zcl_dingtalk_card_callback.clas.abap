@@ -1,4 +1,4 @@
-class ZCL_DINGTALK_CALLBACK definition
+class ZCL_DINGTALK_CARD_CALLBACK definition
   public
   final
   create public .
@@ -28,175 +28,10 @@ ENDCLASS.
 
 
 
-CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
+CLASS ZCL_DINGTALK_CARD_CALLBACK IMPLEMENTATION.
 
 
-  METHOD get_params.
-    DATA:lt_kv_tab TYPE TABLE OF string,
-         wa_kv     TYPE ihttpnvp.
-    CLEAR:lt_kv_tab,wa_kv,my_params.
-    SPLIT params AT '&' INTO TABLE lt_kv_tab.
-    LOOP AT lt_kv_tab ASSIGNING FIELD-SYMBOL(<lt_kv_tab>).
-      CLEAR wa_kv.
-      SPLIT <lt_kv_tab> AT '=' INTO wa_kv-name wa_kv-value.
-      APPEND wa_kv TO my_params.
-    ENDLOOP.
-  ENDMETHOD.
-
-
-  METHOD if_http_extension~handle_request.
-    DATA:lt_header TYPE tihttpnvp,
-         json      TYPE string,
-         proto     TYPE string,
-         host      TYPE string,
-         port      TYPE string.
-    TYPES:BEGIN OF t_JSON1,
-            msg_signature TYPE string,
-            timestamp     TYPE string,
-            nonce         TYPE string,
-            encrypt       TYPE string,
-          END OF t_JSON1.
-    DATA:wa_encrypt TYPE t_JSON1.
-    DATA:text TYPE string.
-    DATA:dingCryptode TYPE REF TO zcl_dingtalk_callback_crypto.
-    DATA: zilogt1 TYPE i,
-          zilogt2 TYPE i,
-          secds   TYPE zilogsecds.
-    " 解密后的消息体结构  02.05.2024 18:23:28 by kkw
-    TYPES: BEGIN OF t_JSON1_event,
-             eventtype TYPE string,
-           END OF t_JSON1_event.
-    DATA:wa_event TYPE t_JSON1_event.
-    DATA my_logger TYPE REF TO zif_logger.
-*返回消息
-    DEFINE http_msg.
-      server->response->set_header_field( name = 'Content-Type' value = 'application/json;charset=utf-8' ).
-      server->response->set_status( code = 200  reason = 'ok' ).
-      server->response->set_cdata( EXPORTING data   = &1 ).
-    END-OF-DEFINITION.
-    my_logger = zcl_logger_factory=>create_log(
-                        object    = 'ZDINGTALK'
-                        subobject = 'ZDT_CB'
-                        desc      = 'ZCL_DINGTALK_CALLBACK'
-                        settings = zcl_logger_factory=>create_settings( ) ).
-    CLEAR:lt_header,json.
-    server->request->get_header_fields( CHANGING fields = lt_header ).
-*从配置表获取加密 aes_key、签名 token以及AppKey
-    SELECT SINGLE * FROM ztddconfig WHERE appid = @appid INTO @DATA(wa_ztddconf).
-    READ TABLE lt_header INTO DATA(wa_header) WITH KEY name = '~request_method' .
-    CASE wa_header-value.
-      WHEN 'GET'.
-        DATA(msg) = `{"rtype": "S","rtmsg": "钉钉回调服务已启动","appid":"` && appid
-        && `","appname":"` && wa_ztddconf-name && `","author":"kkw","mail":"weikj@foxmail.com"}`.
-        http_msg msg.
-        my_logger->s( obj_to_log = msg ) .
-      WHEN 'POST'.
-        GET RUN TIME FIELD zilogt1.
-*获取query参数
-        CLEAR:my_params,json.
-        READ TABLE lt_header INTO DATA(wa_params) WITH KEY name = '~query_string' .
-        my_params = me->get_params( EXPORTING params = wa_params-value ).
-        json = server->request->if_http_entity~get_cdata( ).
-        " 添加@机器人的回调处理  13.06.2024 14:33:01 by kkw
-        READ TABLE my_params ASSIGNING FIELD-SYMBOL(<my_params>) WITH KEY name = 'robot'.
-        IF sy-subrc EQ 0.
-          DATA(robot_name) = <my_params>-value.
-          CALL METHOD me->add_log
-            EXPORTING
-              name       = CONV rs38l_fnam( 'ZDT_CB_ROBOT' )
-              eventtype  = CONV rs38l_par_( robot_name )
-              detail_ori = json
-*             detail     = text
-              secds      = secds.
-          RETURN.
-        ENDIF.
-        CLEAR:wa_encrypt.
-        /ui2/cl_json=>deserialize( EXPORTING json = json  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_encrypt ).
-
-        READ TABLE my_params ASSIGNING <my_params> WITH KEY name = 'signature'.
-        IF sy-subrc EQ 0.
-          wa_encrypt-msg_signature = <my_params>-value.
-        ENDIF.
-        READ TABLE my_params ASSIGNING <my_params> WITH KEY name = 'timestamp'.
-        IF sy-subrc EQ 0.
-          wa_encrypt-timestamp = <my_params>-value.
-        ENDIF.
-        READ TABLE my_params ASSIGNING <my_params> WITH KEY name = 'nonce'.
-        IF sy-subrc EQ 0.
-          wa_encrypt-nonce = <my_params>-value.
-        ENDIF.
-        DATA(json_ori) = /ui2/cl_json=>serialize( data = wa_encrypt  compress = abap_false pretty_name = /ui2/cl_json=>pretty_mode-low_case ).
-*解密请求报文
-        FREE dingcryptode.
-        CREATE OBJECT dingcryptode
-          EXPORTING
-            token          = wa_ztddconf-cbtoken
-            encodingaeskey = wa_ztddconf-cbencodingAesKey
-            key            = wa_ztddconf-appkey.
-        CLEAR:text.
-        CALL METHOD dingcryptode->getdecryptmsg
-          EXPORTING
-            msg_signature         = wa_encrypt-msg_signature
-            timestamp             = wa_encrypt-timestamp
-            nonce                 = wa_encrypt-nonce
-            content               = wa_encrypt-encrypt
-          RECEIVING
-            text                  = text
-          EXCEPTIONS
-            signature_check_error = 1
-            contentx_error        = 2
-            padding_error         = 3
-            appkey_error          = 4
-            OTHERS                = 5.
-        GET RUN TIME FIELD zilogt2.
-        secds = ( zilogt2 - zilogt1 ) / 1000000.
-        IF sy-subrc <> 0.
-          CALL METHOD me->add_log
-            EXPORTING
-              name       = CONV rs38l_fnam( 'ZDT_CB' )
-              eventtype  = CONV rs38l_par_( wa_event-eventtype )
-              detail_ori = json_ori
-              detail     = `{"msg":"解密钉钉回调请求报文失败"}`
-              secds      = secds.
-
-*   Implement suitable error handling here
-          my_logger->s( obj_to_log = |解密钉钉回调请求报文{ wa_encrypt-encrypt }失败| ) .
-          http_msg `error`.
-          RETURN.
-        ENDIF.
-        CLEAR wa_event.
-        /ui2/cl_json=>deserialize( EXPORTING json = text  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_event ).
-        my_logger->s( obj_to_log = |响应钉钉回调事件{ wa_event-eventtype },解密后报文{ text }| ) .
-        CALL METHOD me->add_log
-          EXPORTING
-            name       = CONV rs38l_fnam( 'ZDT_CB' )
-            eventtype  = CONV rs38l_par_( wa_event-eventtype )
-            detail_ori = json_ori
-            detail     = text
-            secds      = secds.
-
-        CASE wa_event-eventtype.
-          WHEN 'check_url'." 验证请求  02.05.2024 23:28:48 by kkw
-            CALL METHOD dingcryptode->getencryptedmap
-              EXPORTING
-                content = `success`
-              RECEIVING
-                res     = DATA(res).
-            http_msg res.
-          WHEN OTHERS.
-            CALL METHOD dingcryptode->getencryptedmap
-              EXPORTING
-                content = `success`
-              RECEIVING
-                res     = res.
-            http_msg res.
-        ENDCASE.
-      WHEN OTHERS.
-    ENDCASE.
-  ENDMETHOD.
-
-
-  METHOD add_log.
+  METHOD ADD_LOG.
     DATA:BEGIN OF zilogkeystr,
            name   TYPE zabap_log-name,
            erdat  TYPE zabap_log-erdat,
@@ -435,5 +270,107 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
 *    ENDIF.
 *  ENDIF.
 *END-OF-DEFINITION.
+  ENDMETHOD.
+
+
+  METHOD GET_PARAMS.
+    DATA:lt_kv_tab TYPE TABLE OF string,
+         wa_kv     TYPE ihttpnvp.
+    CLEAR:lt_kv_tab,wa_kv,my_params.
+    SPLIT params AT '&' INTO TABLE lt_kv_tab.
+    LOOP AT lt_kv_tab ASSIGNING FIELD-SYMBOL(<lt_kv_tab>).
+      CLEAR wa_kv.
+      SPLIT <lt_kv_tab> AT '=' INTO wa_kv-name wa_kv-value.
+      APPEND wa_kv TO my_params.
+    ENDLOOP.
+  ENDMETHOD.
+
+
+  METHOD if_http_extension~handle_request.
+    DATA:lt_header TYPE tihttpnvp,
+         json      TYPE string,
+         res       TYPE string,
+         proto     TYPE string,
+         host      TYPE string,
+         port      TYPE string.
+    TYPES: BEGIN OF t_JSON1,
+             extension            TYPE string,
+             corp_id              TYPE string,
+             out_track_id         TYPE string,
+             value                TYPE string,
+             open_conversation_id TYPE string,
+             user_id              TYPE string,
+             content              TYPE string,
+           END OF t_JSON1.
+    TYPES: t_ACTION_IDS2 TYPE string.
+    TYPES: BEGIN OF t_PARAMS3,
+             callback_key TYPE string,
+             action       TYPE string,
+           END OF t_PARAMS3.
+    TYPES: tt_ACTION_IDS2 TYPE STANDARD TABLE OF t_ACTION_IDS2 WITH DEFAULT KEY.
+    TYPES: BEGIN OF t_CARD_PRIVATE_DATA4,
+             action_ids TYPE tt_ACTION_IDS2,
+             params     TYPE t_PARAMS3,
+           END OF t_CARD_PRIVATE_DATA4.
+    TYPES: BEGIN OF t_JSON1_value,
+             card_private_data TYPE t_CARD_PRIVATE_DATA4,
+           END OF t_JSON1_value.
+    DATA:wa_out       TYPE t_JSON1,
+         wa_out_value TYPE t_JSON1_value.
+    DATA: zilogt1 TYPE i,
+          zilogt2 TYPE i,
+          secds   TYPE zilogsecds.
+    DATA my_logger TYPE REF TO zif_logger.
+*返回消息
+    DEFINE http_msg.
+      server->response->set_header_field( name = 'Content-Type' value = 'application/json;charset=utf-8' ).
+      server->response->set_status( code = 200  reason = 'ok' ).
+      server->response->set_cdata( EXPORTING data   = &1 ).
+    END-OF-DEFINITION.
+*    my_logger = zcl_logger_factory=>create_log(
+*                        object    = 'ZDINGTALK'
+*                        subobject = 'ZDT_CARD_CB'
+*                        desc      = 'ZCL_DINGTALK_CARD_CALLBACK'
+*                        settings = zcl_logger_factory=>create_settings( ) ).
+    CLEAR:lt_header,json.
+    server->request->get_header_fields( CHANGING fields = lt_header ).
+*从配置表获取加密 aes_key、签名 token以及AppKey
+    SELECT SINGLE * FROM ztddconfig WHERE appid = @appid INTO @DATA(wa_ztddconf).
+    READ TABLE lt_header INTO DATA(wa_header) WITH KEY name = '~request_method' .
+    CASE wa_header-value.
+      WHEN 'GET'.
+        DATA(msg) = `{"rtype": "S","rtmsg": "钉钉回调服务已启动"}`.
+        http_msg msg.
+*        my_logger->s( obj_to_log = msg ) .
+      WHEN 'POST'.
+        GET RUN TIME FIELD zilogt1.
+*获取query参数
+        CLEAR:my_params,json.
+        READ TABLE lt_header INTO DATA(wa_params) WITH KEY name = '~query_string' .
+        my_params = me->get_params( EXPORTING params = wa_params-value ).
+        json = server->request->if_http_entity~get_cdata( ).
+        /ui2/cl_json=>deserialize( EXPORTING json = json  pretty_name = /ui2/cl_json=>pretty_mode-camel_case CHANGING data = wa_out ).
+        /ui2/cl_json=>deserialize( EXPORTING json = wa_out-value pretty_name = /ui2/cl_json=>pretty_mode-camel_case CHANGING data = wa_out_value ).
+        CASE wa_out_value-card_private_data-params-action.
+          WHEN 'reexec'.
+            res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"已执行完毕","result":"略略略，回调成功","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+          WHEN 'cancel'.
+            res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"已取消执行","result":"略略略，取消成功","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+        ENDCASE.
+*        DATA(res) = `{"cardData":{"result":"https://open-dev.dingtalk.com/fe/card","rtype":"S","rtmsg":"https://open-dev.dingtalk.com/fe/card"},"cardPrivateData":{}}`.
+*        DATA(res) = `{"rtype": "S","rtmsg": "钉钉回调服务已启动"}`.
+*        DATA(res) = `{"cardData":{"cardParamMap":{"but_status":"0","rtype":"S","rtmsg":"能看到这条消息说明你回调成功了"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+*        res = `{"cardData":{"cardParamMap":{"but_status":"0","result":"略略略，能看到这条消息说明你回调成功了","rtype":"E"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+        http_msg res.
+        CALL METHOD me->add_log
+          EXPORTING
+            name       = CONV rs38l_fnam( 'ZDT_CARD_CB' )
+            eventtype  = CONV rs38l_par_( 'KKW' )
+            detail_ori = json
+            detail     = res
+            secds      = secds.
+
+      WHEN OTHERS.
+    ENDCASE.
   ENDMETHOD.
 ENDCLASS.
