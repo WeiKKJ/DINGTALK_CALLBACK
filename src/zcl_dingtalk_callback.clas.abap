@@ -6,24 +6,24 @@ class ZCL_DINGTALK_CALLBACK definition
 public section.
 
   interfaces IF_HTTP_EXTENSION .
-protected section.
-private section.
 
-  data MY_PARAMS type TIHTTPNVP .
-  data APPID type ZE_APPID value `622d3932-4d65-47b0-8097-b6ef3b795dde` ##NO_TEXT.
-
-  methods GET_PARAMS
-    importing
-      !PARAMS type STRING
-    returning
-      value(MY_PARAMS) type TIHTTPNVP .
-  methods ADD_LOG
+  class-methods ADD_LOG
     importing
       value(NAME) type RS38L_FNAM
       value(EVENTTYPE) type RS38L_PAR_
       value(DETAIL_ORI) type ANY
       value(DETAIL) type ANY optional
       value(SECDS) type ZILOGSECDS .
+protected section.
+private section.
+
+  data MY_PARAMS type TIHTTPNVP .
+
+  methods GET_PARAMS
+    importing
+      !PARAMS type STRING
+    returning
+      value(MY_PARAMS) type TIHTTPNVP .
 ENDCLASS.
 
 
@@ -67,49 +67,56 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
              eventtype TYPE string,
            END OF t_JSON1_event.
     DATA:wa_event TYPE t_JSON1_event.
-    DATA my_logger TYPE REF TO zif_logger.
 *返回消息
     DEFINE http_msg.
       server->response->set_header_field( name = 'Content-Type' value = 'application/json;charset=utf-8' ).
       server->response->set_status( code = 200  reason = 'ok' ).
       server->response->set_cdata( EXPORTING data   = &1 ).
     END-OF-DEFINITION.
-    my_logger = zcl_logger_factory=>create_log(
-                        object    = 'ZDINGTALK'
-                        subobject = 'ZDT_CB'
-                        desc      = 'ZCL_DINGTALK_CALLBACK'
-                        settings = zcl_logger_factory=>create_settings( ) ).
+
     CLEAR:lt_header,json.
     server->request->get_header_fields( CHANGING fields = lt_header ).
-*从配置表获取加密 aes_key、签名 token以及AppKey
-    SELECT SINGLE * FROM ztddconfig WHERE appid = @appid INTO @DATA(wa_ztddconf).
+
     READ TABLE lt_header INTO DATA(wa_header) WITH KEY name = '~request_method' .
     CASE wa_header-value.
       WHEN 'GET'.
-        DATA(msg) = `{"rtype": "S","rtmsg": "钉钉回调服务已启动","appid":"` && appid
-        && `","appname":"` && wa_ztddconf-name && `","author":"kkw","mail":"weikj@foxmail.com"}`.
+        DATA(msg) = `{"rtype": "S","rtmsg": "钉钉回调服务已启动",`
+        && `"author":"kkw","mail":"weikj@foxmail.com"}`.
         http_msg msg.
-        my_logger->s( obj_to_log = msg ) .
       WHEN 'POST'.
         GET RUN TIME FIELD zilogt1.
-*获取query参数
+*获取query参数,必须包含appid参数
         CLEAR:my_params,json.
         READ TABLE lt_header INTO DATA(wa_params) WITH KEY name = '~query_string' .
         my_params = me->get_params( EXPORTING params = wa_params-value ).
         json = server->request->if_http_entity~get_cdata( ).
-        " 添加@机器人的回调处理  13.06.2024 14:33:01 by kkw
-        READ TABLE my_params ASSIGNING FIELD-SYMBOL(<my_params>) WITH KEY name = 'robot'.
+
+        READ TABLE my_params ASSIGNING FIELD-SYMBOL(<my_params>) WITH KEY name = 'appid'.
         IF sy-subrc EQ 0.
-          DATA(robot_name) = <my_params>-value.
+*从配置表获取加密 aes_key、签名 token以及AppKey
+          SELECT SINGLE * FROM ztddconfig WHERE appid = @<my_params>-value INTO @DATA(wa_ztddconf).
+          IF sy-subrc NE 0.
+            http_msg `appid config not found`.
+            RETURN.
+          ENDIF.
+        ELSE.
+          http_msg `appid params missing`.
+          RETURN.
+        ENDIF.
+        " 添加@机器人的回调处理,暂不处理回复逻辑  13.06.2024 14:33:01 by kkw
+        READ TABLE my_params ASSIGNING <my_params> WITH KEY name = 'robot'.
+        IF sy-subrc EQ 0.
           CALL METHOD me->add_log
             EXPORTING
               name       = CONV rs38l_fnam( 'ZDT_CB_ROBOT' )
-              eventtype  = CONV rs38l_par_( robot_name )
+              eventtype  = CONV rs38l_par_( |{ wa_ztddconf-name }&{ <my_params>-value }| ) "robot name
               detail_ori = json
 *             detail     = text
               secds      = secds.
+          http_msg `Welcome to ABAP`.
           RETURN.
         ENDIF.
+        "事件订阅的回调处理解密处理
         CLEAR:wa_encrypt.
         /ui2/cl_json=>deserialize( EXPORTING json = json  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_encrypt ).
 
@@ -156,17 +163,17 @@ CLASS ZCL_DINGTALK_CALLBACK IMPLEMENTATION.
               name       = CONV rs38l_fnam( 'ZDT_CB' )
               eventtype  = CONV rs38l_par_( wa_event-eventtype )
               detail_ori = json_ori
-              detail     = `{"msg":"解密钉钉回调请求报文失败"}`
+              detail     = `{"msg":"解密钉钉回调请求报文失败","cbtoken":"` && wa_ztddconf-cbtoken && `","cbencodingAesKey":"` && wa_ztddconf-cbencodingAesKey
+                           && `","cbencodingAesKey":"` && wa_ztddconf-appkey
+                           && `"}`
               secds      = secds.
 
 *   Implement suitable error handling here
-          my_logger->s( obj_to_log = |解密钉钉回调请求报文{ wa_encrypt-encrypt }失败| ) .
           http_msg `error`.
           RETURN.
         ENDIF.
         CLEAR wa_event.
         /ui2/cl_json=>deserialize( EXPORTING json = text  pretty_name = /ui2/cl_json=>pretty_mode-low_case CHANGING data = wa_event ).
-        my_logger->s( obj_to_log = |响应钉钉回调事件{ wa_event-eventtype },解密后报文{ text }| ) .
         CALL METHOD me->add_log
           EXPORTING
             name       = CONV rs38l_fnam( 'ZDT_CB' )
