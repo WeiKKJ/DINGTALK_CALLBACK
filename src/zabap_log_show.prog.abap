@@ -34,8 +34,6 @@ DATA: BEGIN OF zilogkeystr,
         indx   LIKE zabap_log-indx,
         fdname LIKE zabap_log-fdname,
       END OF zilogkeystr.
-DATA:go_deep_alv TYPE REF TO zcl_deepalv,
-     p_title     TYPE char100.
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE btxt1.
   PARAMETERS p_name TYPE zabap_log-name NO-DISPLAY.
   SELECT-OPTIONS s_erdat FOR gs_out-erdat DEFAULT sy-datum.

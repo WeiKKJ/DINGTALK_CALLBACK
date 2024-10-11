@@ -122,19 +122,23 @@ CLASS ZCL_DINGTALK_CARD_CALLBACK IMPLEMENTATION.
           ELSE.
             CASE wa_out_value-card_private_data-params-action.
               WHEN 'reexec'.
-                CALL METHOD zcl_dingtalk_card_callback=>re_exec
-                  EXPORTING
-                    outtrackid = CONV ze_outtrackid( wa_out-out_track_id )
-                  IMPORTING
-*                   rtype      =
-                    rtmsg      = rtmsg.
-                IF rtmsg CS '成功'.
-                  res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"已执行完毕","result":"回调成功，` && rtmsg && `","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+                IF sy-mandt = '800'.
+                  res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"暂不启用该功能","result":"暂不启用该功能` && rtmsg && `","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
                 ELSE.
-                  res = `{"cardData":{"cardParamMap":{"result":"回调成功，` && rtmsg && `","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+                  CALL METHOD zcl_dingtalk_card_callback=>re_exec
+                    EXPORTING
+                      outtrackid = CONV ze_outtrackid( wa_out-out_track_id )
+                    IMPORTING
+*                     rtype      =
+                      rtmsg      = rtmsg.
+                  IF rtmsg CS '成功'.
+                    res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"已执行完毕","result":"回调成功，` && rtmsg && `","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+                  ELSE.
+                    res = `{"cardData":{"cardParamMap":{"result":"回调成功，` && rtmsg && `","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+                  ENDIF.
                 ENDIF.
               WHEN 'cancel'.
-                res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"已取消执行","result":"略略略，取消成功","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
+                res = `{"cardData":{"cardParamMap":{"butStatus":"0","but02Text":"已取消执行","result":"取消成功","rtype":"S"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
               WHEN OTHERS.
                 res = `{"cardData":{"cardParamMap":{"result":"请求不被支持","rtype":"E"}},"userIdType":1,"cardOptions":{"updateCardDataByKey":true,"updatePrivateDataByKey":false}}`.
             ENDCASE.
@@ -253,10 +257,10 @@ CLASS ZCL_DINGTALK_CARD_CALLBACK IMPLEMENTATION.
       FREE MEMORY ID 'ZRFC_DATA_READ-OUTTRACKID'.
     ENDIF.
     EXPORT outtrackid = outtrackid TO MEMORY ID 'ZRFC_DATA_READ-OUTTRACKID'.
-    SUBMIT zrfc_data_read
-      WITH SELECTION-TABLE seltab
-      AND RETURN
-        .
+*    SUBMIT zrfc_data_read
+*      WITH SELECTION-TABLE seltab
+*      AND RETURN
+*        .
     IMPORT rtmsg = rtmsg FROM MEMORY ID 'ZRFC_DATA_READ-RTMSG'.
   ENDMETHOD.
 ENDCLASS.
